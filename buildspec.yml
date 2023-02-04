@@ -1,0 +1,68 @@
+---
+# Build app in Docker and push to repo
+# Generate imagedefinitions.json file for ECS deploy
+# Generate imageDetail.json file for CodeDeploy ECS blue/green deploy
+#
+# https://docs.aws.amazon.com/AmazonECS/latest/userguide/ecs-cd-pipeline.html
+# Environment vars:
+#   REPO_URI: ECS app repository URI
+#   CONTAINER_NAME: container name in service task definition
+# https://docs.aws.amazon.com/codebuild/latest/userguide/build-env-ref-env-vars.html
+#   AWS_DEFAULT_REGION
+#   CODEBUILD_RESOLVED_SOURCE_VERSION
+version: 0.2
+env:
+  variables:
+    IMAGE_NAME: 'ecs-flask-example'
+phases:
+  install:
+    runtime-versions:
+      docker: 18
+  pre_build:
+    commands:
+      - echo Build started on `date`
+      - echo Logging in to Amazon ECR...
+      - aws --version
+      - $(aws ecr get-login --region $AWS_DEFAULT_REGION --no-include-email)
+      - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
+      - IMAGE_TAG=${COMMIT_HASH:=latest}
+  build:
+    commands:
+      - echo Building the Docker image...
+      - docker build -t $REPO_URI:latest -t $REPO_URI:$IMAGE_TAG -f Dockerfile .
+      - echo Running unit tests...
+      - docker run $REPO_URI:latest python test_basic.py
+      # - docker run $IMAGE_NAME python test_basic.py
+      # - docker-compose run $IMAGE_NAME python test_basic.py
+  post_build:
+    commands:
+      - echo Pushing Docker images to container registry...
+      - docker push $REPO_URI:latest
+      - docker push $REPO_URI:$IMAGE_TAG
+      - echo Writing image definitions file...
+      # https://docs.aws.amazon.com/codepipeline/latest/userguide/file-reference.html
+      # ECS standard deployment action
+      - printf '[{"name":"%s","imageUri":"%s"}]' "$CONTAINER_NAME" "$REPO_URI:$IMAGE_TAG" | tee imagedefinitions.json
+      # ECS blue/green deployment action
+      - printf '{"ImageURI":"%s"}' "$REPO_URI:$IMAGE_TAG" | tee imageDetail.json
+
+      - sed -i 's!<NAME>!'$CONTAINER_NAME'!g' appspec.yml taskdef.json
+      - sed -i 's!<PORT>!'$PORT'!g' appspec.yml taskdef.json
+      - sed -i 's!<TASK_ROLE_ARN>!'$TASK_ROLE_ARN'!g' taskdef.json
+      - sed -i 's!<EXECUTION_ROLE_ARN>!'$EXECUTION_ROLE_ARN'!g' taskdef.json
+      - sed -i 's!<CPU>!'$CPU'!g' taskdef.json
+      - sed -i 's!<MEMORY>!'$MEMORY'!g' taskdef.json
+      - sed -i 's!<AWSLOGS_GROUP>!'$AWSLOGS_GROUP'!g' taskdef.json
+      - sed -i 's!<AWSLOGS_REGION>!'$AWS_REGION'!g' taskdef.json
+      - sed -i 's!<AWSLOGS_STREAM_PREFIX>!'$AWSLOGS_STREAM_PREFIX'!g' taskdef.json
+
+      - cat appspec.yml
+      - cat taskdef.json
+
+      - echo Build completed on `date`
+artifacts:
+  files:
+    - imagedefinitions.json
+    - imageDetail.json
+    - appspec.yml
+    - taskdef.json
